@@ -50,56 +50,58 @@ function App() {
       const parsed = new URL(clean);
       const host = parsed.hostname.toLowerCase().replace(/^www\./i, '');
       const wwwHost = 'www.' + host;
-      const timedFetch = async (resource, ms = 5000) => {
+      const timedFetch = async (resource, ms = 30000) => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), ms);
         try { return await fetch(resource, { signal: controller.signal, cache: 'no-store' }); }
         finally { clearTimeout(timer); }
       };
-      const readAvailability = async target => {
-        try {
-          const response = await timedFetch('https://archive.org/wayback/available?url=' + encodeURIComponent(target));
-          if (!response.ok) return null;
-          const snap = (await response.json())?.archived_snapshots?.closest;
-          return snap?.timestamp && snap?.url ? { timestamp: String(snap.timestamp), original: String(snap.url), status: String(snap.status || 200), digest: '' } : null;
-        } catch (_) { return null; }
-      };
-      const availabilityTargets = [...new Set([clean, parsed.origin + parsed.pathname, host + '/', wwwHost + '/'])];
-      const availabilityResults = await Promise.all(availabilityTargets.map(readAvailability));
-      let rows = availabilityResults.filter(Boolean);
-
-      const cdxTargets = [...new Set([parsed.hostname + parsed.pathname, wwwHost + '/', host + '/*'])];
-      const requests = cdxTargets.flatMap(target => {
+      const queryCDX = async target => {
         const query = new URLSearchParams({
-          url: target, output: 'json', filter: 'statuscode:200', filter2: 'mimetype:text/html',
-          collapse: 'timestamp:4', fl: 'timestamp,original,statuscode,digest',
-          from: '1996', to: String(new Date().getFullYear()), limit: '120'
+          url: target, output: 'json', gzip: 'false',
+          filter: 'statuscode:200', filter2: 'mimetype:text/html',
+          collapse: 'timestamp:6', fl: 'timestamp,original,statuscode,digest',
+          from: '1996', to: String(new Date().getFullYear()), limit: '500'
         }).toString();
         const endpoint = 'https://web.archive.org/cdx/search/cdx?' + query;
-        return [endpoint, 'https://api.allorigins.win/raw?url=' + encodeURIComponent(endpoint)];
-      });
-      const results = await Promise.all(requests.map(async endpoint => {
-        try {
-          const response = await timedFetch(endpoint, 5000);
-          if (!response.ok) return [];
-          const data = await response.json();
-          if (!Array.isArray(data)) return [];
-          return data.slice(1).filter(row => row?.[0] && row?.[1]).map(row => ({
-            timestamp: String(row[0]), original: String(row[1]),
-            status: String(row[2] || 200), digest: String(row[3] || '')
-          }));
-        } catch (_) { return []; }
-      }));
-      const indexedRows = results.flat();
-      if (indexedRows.length) rows = indexedRows;
+        for (const requestUrl of ['https://api.allorigins.win/raw?url=' + encodeURIComponent(endpoint), endpoint]) {
+          try {
+            const response = await timedFetch(requestUrl, 30000);
+            if (!response.ok) continue;
+            const data = await response.json();
+            if (!Array.isArray(data)) continue;
+            const rows = data.slice(1).filter(row => Array.isArray(row) && row[0] && row[1]).map(row => ({
+              timestamp: String(row[0]), original: String(row[1]),
+              status: String(row[2] || 200), digest: String(row[3] || '')
+            }));
+            if (rows.length) return rows;
+          } catch (_) {}
+        }
+        return [];
+      };
+      const targets = [...new Set([parsed.hostname + parsed.pathname, host + '/*', wwwHost + '/*'])];
+      const results = await Promise.all(targets.map(queryCDX));
+      let rows = results.flat();
+      if (!rows.length) {
+        const variants = [...new Set([clean, parsed.origin + parsed.pathname, host + '/', wwwHost + '/'])];
+        const fallback = await Promise.all(variants.map(async target => {
+          try {
+            const response = await timedFetch('https://archive.org/wayback/available?url=' + encodeURIComponent(target), 7000);
+            if (!response.ok) return null;
+            const snap = (await response.json())?.archived_snapshots?.closest;
+            return snap?.timestamp && snap?.url ? { timestamp: String(snap.timestamp), original: String(snap.url), status: String(snap.status || 200), digest: '' } : null;
+          } catch (_) { return null; }
+        }));
+        rows = fallback.filter(Boolean);
+      }
       const unique = new Map();
       rows.forEach(row => unique.set(row.timestamp + '|' + row.original, row));
       rows = [...unique.values()].sort((x, y) => x.timestamp.localeCompare(y.timestamp));
       setCaptures(rows);
       setYear(rows.length ? Number(rows[rows.length - 1].timestamp.slice(0, 4)) : 2000);
       if (!rows.length) setError(t(
-        'No public snapshots were found, or the archive service did not respond in time. Try a homepage URL or retry in a moment.',
-        'Snapshot publik tidak ditemukan, atau layanan arsip terlalu lama merespons. Coba URL halaman utama atau ulangi sebentar lagi.'
+        'No public snapshots were returned. The archive may have no captures for this address, or the archive index may be temporarily unavailable. Try the homepage URL.',
+        'Arsip publik untuk alamat ini tidak ditemukan, atau indeks Wayback sedang tidak tersedia. Coba URL halaman utama.'
       ));
     } catch (_) {
       setError(t('That address does not look valid. Check it and try again.', 'Alamat tersebut sepertinya tidak valid. Periksa kembali lalu coba lagi.'));
@@ -166,7 +168,7 @@ function App() {
       <div className="tool-heading"><span className="eyebrow"><History size={13}/> 01 / INTERNET TIME MACHINE</span><h1>{t('Take a trip','Kembali')} <em>{t('back in time.','ke masa lalu.')}</em></h1><p>{t('Enter a website. Find its archived footprints. See the web as it used to be.','Masukkan alamat website. Temukan jejak arsipnya. Lihat internet seperti dahulu.')}</p></div>
       <form className="search-panel" onSubmit={lookup}><label htmlFor="url-input">{t('WEBSITE ADDRESS','ALAMAT WEBSITE')}</label><div className="search-row"><Globe2 size={18}/><input id="url-input" value={url} onChange={e=>setUrl(e.target.value)} placeholder="example.com"/><button className="button button-primary" disabled={loading}>{loading?'SEARCHING...':t('Find history','Cari arsip')} <Search size={15}/></button></div><div className="suggestions"><span>{t('TRY A CLASSIC','COBA WEBSITE INI')}</span>{['google.com','youtube.com','wikipedia.org','yahoo.com'].map(x=><button type="button" key={x} onClick={()=>setUrl('https://www.'+x)}>{x}</button>)}</div></form>
       {error && <div className="notice error-notice"><Info size={17}/>{error}</div>}
-      {captures.length>0 && <><div className="results-meta"><div><span className="eyebrow">{t('ARCHIVE RESULTS','HASIL ARSIP')}</span><h2>{captures.length.toLocaleString()} <em>{t('snapshots found','arsip ditemukan')}</em></h2></div><span className="mono">{years[0]} — {years[years.length-1]}</span></div><div className="timeline-panel"><div className="timeline-top"><span>{t('SELECT A YEAR','PILIH TAHUN')}</span><span>{selectedCaptures.length} {t('captures','arsip')}</span></div><input className="year-slider" type="range" min={years[0]} max={years[years.length-1]} value={year} onChange={e=>{setYear(Number(e.target.value));setActiveCapture(null)}}/><div className="year-labels"><span>{years[0]}</span><strong>{year}</strong><span>{years[years.length-1]}</span></div><div className="year-chips">{years.map(y=><button className={year===y?'selected':''} key={y} onClick={()=>{setYear(y);setActiveCapture(null)}}>{y}</button>)}</div></div><div className="capture-list"><div className="capture-list-head">{t('AVAILABLE SNAPSHOTS','ARSIP YANG TERSEDIA')}</div>{selectedCaptures.slice(-12).reverse().map(c=><button key={c.timestamp} className={chosen?.timestamp===c.timestamp?'capture-row selected':'capture-row'} onClick={()=>setActiveCapture(c)}><CalendarDays size={16}/><span>{c.timestamp.slice(0,4)}.{c.timestamp.slice(4,6)}.{c.timestamp.slice(6,8)}</span><span className="capture-time">{c.timestamp.slice(8,10)}:{c.timestamp.slice(10,12)} UTC</span><ArrowUpRight size={15}/></button>)}</div>{chosen&&<div className="snapshot-preview"><div className="preview-head"><div><span className="eyebrow">{t('SELECTED SNAPSHOT','ARSIP TERPILIH')}</span><h3>{chosen.timestamp.slice(0,4)} / {chosen.timestamp.slice(4,6)} / {chosen.timestamp.slice(6,8)}</h3></div><a className="button button-primary" href={archiveUrl(chosen)} target="_blank" rel="noreferrer">{t('Open archived page','Buka halaman arsip')} <ArrowUpRight size={15}/></a></div><iframe title="Archived website snapshot" src={archiveUrl(chosen)} loading="lazy" sandbox="allow-scripts allow-same-origin allow-forms" referrerPolicy="no-referrer"/></div>}</>}
+      {captures.length>0 && <><div className="results-meta"><div><span className="eyebrow">{t('ARCHIVE RESULTS','HASIL ARSIP')}</span><h2>{captures.length.toLocaleString()} <em>{t('snapshots found','arsip ditemukan')}</em></h2></div><span className="mono">{years[0]} — {years[years.length-1]}</span></div><div className="timeline-panel"><div className="timeline-top"><span>{t('SELECT A YEAR','PILIH TAHUN')}</span><span>{selectedCaptures.length} {t('captures','arsip')}</span></div><input className="year-slider" type="range" min={years[0]} max={years[years.length-1]} value={year} onChange={e=>{setYear(Number(e.target.value));setActiveCapture(null)}}/><div className="year-labels"><span>{years[0]}</span><strong>{year}</strong><span>{years[years.length-1]}</span></div><div className="year-chips">{years.map(y=><button className={year===y?'selected':''} key={y} onClick={()=>{setYear(y);setActiveCapture(null)}}>{y}</button>)}</div></div><div className="capture-list"><div className="capture-list-head">{t('AVAILABLE SNAPSHOTS','ARSIP YANG TERSEDIA')}</div>{selectedCaptures.slice(-12).reverse().map(c=><button key={c.timestamp} className={chosen?.timestamp===c.timestamp?'capture-row selected':'capture-row'} onClick={()=>setActiveCapture(c)}><CalendarDays size={16}/><span>{c.timestamp.slice(0,4)}.{c.timestamp.slice(4,6)}.{c.timestamp.slice(6,8)}</span><span className="capture-time">{c.timestamp.slice(8,10)}:{c.timestamp.slice(10,12)} UTC</span><ArrowUpRight size={15}/></button>)}</div>{chosen&&<div className="snapshot-preview"><div className="preview-head"><div><span className="eyebrow">{t('SELECTED SNAPSHOT','ARSIP TERPILIH')}</span><h3>{chosen.timestamp.slice(0,4)} / {chosen.timestamp.slice(4,6)} / {chosen.timestamp.slice(6,8)}</h3></div><a className="button button-primary" href={archiveUrl(chosen)} target="_blank" rel="noreferrer">{t('Open archived page','Buka halaman arsip')} <ArrowUpRight size={15}/></a></div><iframe title="Archived website snapshot" src={archiveUrl(chosen).replace("/web/" + chosen.timestamp + "/", "/web/" + chosen.timestamp + "if_/")} loading="lazy" referrerPolicy="strict-origin-when-cross-origin"/></div>}</>}
       <div className="notice"><Info size={17}/>{t('Archive coverage varies. Some pages may load incompletely or refuse to display inside the preview. Use “Open archived page” to view the snapshot directly on the Internet Archive.','Ketersediaan arsip berbeda-beda. Beberapa halaman mungkin tidak tampil sempurna di preview. Gunakan tombol “Buka halaman arsip” untuk melihatnya langsung di Internet Archive.')}</div>
     </main>}
 
