@@ -51,6 +51,7 @@ function App() {
       const data = await response.json();
       const rows = Array.isArray(data) ? data.slice(1).map(row => ({ timestamp: row[0], original: row[1], status: row[2], digest: row[3] })) : [];
       setCaptures(rows);
+      setYear(rows.length ? Number(rows[rows.length - 1].timestamp.slice(0, 4)) : 2000);
       if (!rows.length) setError(t('No snapshots found for this address. Try a popular domain such as google.com or wikipedia.org.', 'Belum ada snapshot untuk alamat ini. Coba domain populer seperti google.com atau wikipedia.org.'));
     } catch (err) {
       setError(err.message || t('Could not reach the archive service.', 'Tidak dapat menghubungi layanan arsip.'));
