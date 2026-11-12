@@ -19,3 +19,5 @@ The included GitHub Actions workflow builds and deploys the Vite app to GitHub P
 - Internet Time Machine depends on the public Internet Archive service and the availability of archived captures. Some archived pages may be incomplete or block embedding.
 - What If results are educational models, not predictions. The 100-billion-human scenario explicitly distinguishes arithmetic estimates from speculative societal consequences.
 - No account, backend, or database is required. Preferences and recent activity stay in the browser.
+
+Latest workflow fix: the Pages build uses `npm install` without requiring a committed lockfile.
