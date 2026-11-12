@@ -50,74 +50,58 @@ function App() {
       const parsed = new URL(clean);
       const host = parsed.hostname.toLowerCase().replace(/^www\./i, '');
       const wwwHost = 'www.' + host;
-      const timeoutFetch = async (resource, ms=7500) => {
+      const timedFetch = async (resource, ms = 5000) => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), ms);
-        try { return await fetch(resource, {signal:controller.signal, cache:'no-store'}); }
+        try { return await fetch(resource, { signal: controller.signal, cache: 'no-store' }); }
         finally { clearTimeout(timer); }
       };
-      const readAvailability = async (target) => {
+      const readAvailability = async target => {
         try {
-          const r = await timeoutFetch('https://archive.org/wayback/available?url=' + encodeURIComponent(target), 6500);
-          if (!r.ok) return null;
-          const snap = (await r.json())?.archived_snapshots?.closest;
-          return snap?.timestamp && snap?.url ? {timestamp:String(snap.timestamp),original:String(snap.url),status:String(snap.status || 200),digest:''} : null;
+          const response = await timedFetch('https://archive.org/wayback/available?url=' + encodeURIComponent(target));
+          if (!response.ok) return null;
+          const snap = (await response.json())?.archived_snapshots?.closest;
+          return snap?.timestamp && snap?.url ? { timestamp: String(snap.timestamp), original: String(snap.url), status: String(snap.status || 200), digest: '' } : null;
         } catch (_) { return null; }
       };
-      const candidates = [...new Set([clean, parsed.origin + parsed.pathname, host + '/', wwwHost + '/', 'http://' + host + '/', 'https://' + host + '/'])];
-      let rows = [];
-      // Ask Availability for the exact page first, then common host variants.
-      for (const target of candidates.slice(0,4)) {
-        const snap = await readAvailability(target);
-        if (snap) rows.push(snap);
-        if (rows.length >= 3) break;
-      }
-      // Large domains (especially video/social platforms) can overwhelm a broad CDX query.
-      // Probe narrower URL prefixes first, then expand to the domain only if needed.
-      const cdxTargets = [...new Set([
-        parsed.hostname + parsed.pathname,
-        'www.' + host + '/',
-        host + '/',
-        parsed.hostname + '/*',
-        wwwHost + '/*',
-        host + '/*'
-      ])];
-      const relays = [
-        u => u,
-        u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
-        u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
-        u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u)
-      ];
-      let indexedRows = [];
-      for (const target of cdxTargets) {
-        const cdx = 'https://web.archive.org/cdx/search/cdx?' + new URLSearchParams({
-          url:target, output:'json', filter:'statuscode:200', filter2:'mimetype:text/html',
-          collapse:'timestamp:4', fl:'timestamp,original,statuscode,digest',
-          from:'1996', to:'2026', limit:'120', showResumeKey:'false'
+      const availabilityTargets = [...new Set([clean, parsed.origin + parsed.pathname, host + '/', wwwHost + '/'])];
+      const availabilityResults = await Promise.all(availabilityTargets.map(readAvailability));
+      let rows = availabilityResults.filter(Boolean);
+
+      const cdxTargets = [...new Set([parsed.hostname + parsed.pathname, wwwHost + '/', host + '/*'])];
+      const requests = cdxTargets.flatMap(target => {
+        const query = new URLSearchParams({
+          url: target, output: 'json', filter: 'statuscode:200', filter2: 'mimetype:text/html',
+          collapse: 'timestamp:4', fl: 'timestamp,original,statuscode,digest',
+          from: '1996', to: String(new Date().getFullYear()), limit: '120'
         }).toString();
-        for (const relay of relays) {
-          try {
-            const response = await timeoutFetch(relay(cdx), 7000);
-            if (!response.ok) continue;
-            const data = await response.json();
-            if (!Array.isArray(data)) continue;
-            const found = data.slice(1).filter(row => row?.[0] && row?.[1]).map(row => ({
-              timestamp:String(row[0]), original:String(row[1]),
-              status:String(row[2] || 200), digest:String(row[3] || '')
-            }));
-            if (found.length) { indexedRows = found; break; }
-          } catch (_) {}
-        }
-        if (indexedRows.length >= 8) break;
-      }
+        const endpoint = 'https://web.archive.org/cdx/search/cdx?' + query;
+        return [endpoint, 'https://api.allorigins.win/raw?url=' + encodeURIComponent(endpoint)];
+      });
+      const results = await Promise.all(requests.map(async endpoint => {
+        try {
+          const response = await timedFetch(endpoint, 5000);
+          if (!response.ok) return [];
+          const data = await response.json();
+          if (!Array.isArray(data)) return [];
+          return data.slice(1).filter(row => row?.[0] && row?.[1]).map(row => ({
+            timestamp: String(row[0]), original: String(row[1]),
+            status: String(row[2] || 200), digest: String(row[3] || '')
+          }));
+        } catch (_) { return []; }
+      }));
+      const indexedRows = results.flat();
       if (indexedRows.length) rows = indexedRows;
       const unique = new Map();
       rows.forEach(row => unique.set(row.timestamp + '|' + row.original, row));
-      rows = [...unique.values()].sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
+      rows = [...unique.values()].sort((x, y) => x.timestamp.localeCompare(y.timestamp));
       setCaptures(rows);
-      setYear(rows.length ? Number(rows[rows.length - 1].timestamp.slice(0,4)) : 2000);
-      if (!rows.length) setError(t('No public snapshots were found for this page. Some websites block archiving or have limited Wayback coverage. Try the homepage URL (without extra parameters).', 'Snapshot publik untuk halaman ini tidak ditemukan. Beberapa website membatasi pengarsipan atau memang minim arsip Wayback. Coba URL halaman utama tanpa parameter tambahan.'));
-    } catch (err) {
+      setYear(rows.length ? Number(rows[rows.length - 1].timestamp.slice(0, 4)) : 2000);
+      if (!rows.length) setError(t(
+        'No public snapshots were found, or the archive service did not respond in time. Try a homepage URL or retry in a moment.',
+        'Snapshot publik tidak ditemukan, atau layanan arsip terlalu lama merespons. Coba URL halaman utama atau ulangi sebentar lagi.'
+      ));
+    } catch (_) {
       setError(t('That address does not look valid. Check it and try again.', 'Alamat tersebut sepertinya tidak valid. Periksa kembali lalu coba lagi.'));
     } finally { setLoading(false); }
   };
