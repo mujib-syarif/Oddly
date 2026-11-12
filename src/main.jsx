@@ -66,7 +66,7 @@ function App() {
   const scenarios = {
     population: { title: t('100 billion humans on Earth', '100 miliar manusia di Bumi'), subtitle: t('A planet-scale population thought experiment.', 'Eksperimen pikiran populasi skala planet.'), icon: Users },
     sun: { title: t('The Sun disappears', 'Matahari menghilang'), subtitle: t('A sudden change to the centre of our solar system.', 'Perubahan mendadak pada pusat tata surya kita.'), icon: Orbit },
-    internet: { title: t('The internet goes dark for 7 days', 'Internet mati selama 7 hari'), subtitle: t('A global outage with cascading consequences.', 'Gangguan global dengan konsekuensi berantai.') }
+    internet: { title: t('The internet goes dark for 7 days', 'Internet mati selama 7 hari'), subtitle: t('A global outage with cascading consequences.', 'Gangguan global dengan konsekuensi berantai.'), icon: Globe2 }
   };
   const areaPerPerson = land * 1e12 / (population * 1e9);
   const footprint = Math.sqrt(areaPerPerson);
