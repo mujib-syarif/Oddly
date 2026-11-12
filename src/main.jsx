@@ -44,33 +44,54 @@ function App() {
     e?.preventDefault();
     let clean = url.trim();
     if (!clean) return;
-    if (!/^https?:\/\//i.test(clean)) clean = 'https://' + clean;
+    if (!/^https?:\\/\\//i.test(clean)) clean = 'https://' + clean;
+    setUrl(clean); setLoading(true); setError(''); setCaptures([]); setActiveCapture(null);
     try {
-      const host = new URL(clean).hostname;
-      setUrl(clean); setLoading(true); setError(''); setCaptures([]); setActiveCapture(null);
-      const params = new URLSearchParams({url: host, output:'json', filter:'statuscode:200', collapse:'timestamp:4', fl:'timestamp,original,statuscode,digest', from:'1996', to:'2026', limit:'300', gzip:'false'});
-      const endpoint = 'https://proxy.cors.dev/https://web.archive.org/cdx/search/cdx?' + params.toString();
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 18000);
-      let data;
+      const parsed = new URL(clean);
+      const host = parsed.hostname.replace(/^www\\./i, '');
+      const timeoutFetch = async (resource, ms=9000) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), ms);
+        try { return await fetch(resource, {signal:controller.signal, cache:'no-store'}); }
+        finally { clearTimeout(timer); }
+      };
+      let rows = [];
+      // Fast path: the Availability API usually returns one known-good snapshot.
       try {
-        const response = await fetch(endpoint, {signal: controller.signal, cache:'no-store'});
-        if (!response.ok) throw new Error('Archive index unavailable');
-        data = await response.json();
-      } finally { clearTimeout(timeout); }
-      let rows = Array.isArray(data) ? data.slice(1).map(row => ({ timestamp: row[0], original: row[1], status: row[2], digest: row[3] })) : [];
-      if (!rows.length) {
-        const fallback = await fetch('https://archive.org/wayback/available?url=' + encodeURIComponent(host), {signal: AbortSignal.timeout(9000)});
-        if (fallback.ok) {
-          const snapshot = (await fallback.json())?.archived_snapshots?.closest;
-          if (snapshot?.timestamp && snapshot?.url) rows = [{timestamp:snapshot.timestamp, original:snapshot.url, status:String(snapshot.status || 200), digest:''}];
+        const available = await timeoutFetch('https://archive.org/wayback/available?url=' + encodeURIComponent(clean), 8000);
+        if (available.ok) {
+          const snap = (await available.json())?.archived_snapshots?.closest;
+          if (snap?.timestamp && snap?.url) rows.push({timestamp:snap.timestamp, original:snap.url, status:String(snap.status || 200), digest:''});
         }
-      }
+      } catch (_) {}
+      // Rich path: query the CDX index through a CORS-readable relay.
+      try {
+        const cdx = 'https://web.archive.org/cdx/search/cdx?' + new URLSearchParams({
+          url: host, matchType:'domain', output:'json', filter:'statuscode:200',
+          filter2:'mimetype:text/html', collapse:'timestamp:4',
+          fl:'timestamp,original,statuscode,digest', from:'1996', to:'2026',
+          limit:'250', gzip:'false'
+        }).toString();
+        const relay = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(cdx);
+        const response = await timeoutFetch(relay, 12000);
+        if (response.ok) {
+          const data = await response.json();
+          if (Array.isArray(data)) {
+            const indexed = data.slice(1).filter(row => row?.[0] && row?.[1]).map(row => ({
+              timestamp:String(row[0]), original:String(row[1]), status:String(row[2] || 200), digest:String(row[3] || '')
+            }));
+            if (indexed.length) rows = indexed;
+          }
+        }
+      } catch (_) {}
+      const unique = new Map();
+      rows.forEach(row => unique.set(row.timestamp + '|' + row.original, row));
+      rows = [...unique.values()].sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
       setCaptures(rows);
-      setYear(rows.length ? Number(rows[rows.length - 1].timestamp.slice(0, 4)) : 2000);
-      if (!rows.length) setError(t('No snapshots found. Try google.com, wikipedia.org, or a full page URL.', 'Arsip tidak ditemukan. Coba google.com, wikipedia.org, atau alamat halaman lengkap.'));
+      setYear(rows.length ? Number(rows[rows.length - 1].timestamp.slice(0,4)) : 2000);
+      if (!rows.length) setError(t('No archived snapshot was found, or the archive services are temporarily unavailable. Try a full page URL or another domain.', 'Snapshot arsip tidak ditemukan atau layanan arsip sedang tidak tersedia. Coba alamat halaman lengkap atau domain lain.'));
     } catch (err) {
-      setError(err.name === 'AbortError' || err.name === 'TimeoutError' ? t('The archive took too long to respond. Try again or use a simpler address.', 'Arsip terlalu lama merespons. Coba lagi atau gunakan alamat yang lebih sederhana.') : t('Could not reach the archive right now. Please try again in a moment.', 'Arsip tidak dapat dijangkau saat ini. Coba lagi sebentar lagi.'));
+      setError(t('That address does not look valid. Check it and try again.', 'Alamat tersebut sepertinya tidak valid. Periksa kembali lalu coba lagi.'));
     } finally { setLoading(false); }
   };
 
