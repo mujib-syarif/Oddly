@@ -44,52 +44,79 @@ function App() {
     e?.preventDefault();
     let clean = url.trim();
     if (!clean) return;
-    if (!/^https?:\\/\\//i.test(clean)) clean = 'https://' + clean;
+    if (!/^https?:\/\//i.test(clean)) clean = 'https://' + clean;
     setUrl(clean); setLoading(true); setError(''); setCaptures([]); setActiveCapture(null);
     try {
       const parsed = new URL(clean);
-      const host = parsed.hostname.replace(/^www\\./i, '');
-      const timeoutFetch = async (resource, ms=9000) => {
+      const host = parsed.hostname.toLowerCase().replace(/^www\./i, '');
+      const wwwHost = 'www.' + host;
+      const timeoutFetch = async (resource, ms=7500) => {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), ms);
         try { return await fetch(resource, {signal:controller.signal, cache:'no-store'}); }
         finally { clearTimeout(timer); }
       };
+      const readAvailability = async (target) => {
+        try {
+          const r = await timeoutFetch('https://archive.org/wayback/available?url=' + encodeURIComponent(target), 6500);
+          if (!r.ok) return null;
+          const snap = (await r.json())?.archived_snapshots?.closest;
+          return snap?.timestamp && snap?.url ? {timestamp:String(snap.timestamp),original:String(snap.url),status:String(snap.status || 200),digest:''} : null;
+        } catch (_) { return null; }
+      };
+      const candidates = [...new Set([clean, parsed.origin + parsed.pathname, host + '/', wwwHost + '/', 'http://' + host + '/', 'https://' + host + '/'])];
       let rows = [];
-      // Fast path: the Availability API usually returns one known-good snapshot.
-      try {
-        const available = await timeoutFetch('https://archive.org/wayback/available?url=' + encodeURIComponent(clean), 8000);
-        if (available.ok) {
-          const snap = (await available.json())?.archived_snapshots?.closest;
-          if (snap?.timestamp && snap?.url) rows.push({timestamp:snap.timestamp, original:snap.url, status:String(snap.status || 200), digest:''});
-        }
-      } catch (_) {}
-      // Rich path: query the CDX index through a CORS-readable relay.
-      try {
+      // Ask Availability for the exact page first, then common host variants.
+      for (const target of candidates.slice(0,4)) {
+        const snap = await readAvailability(target);
+        if (snap) rows.push(snap);
+        if (rows.length >= 3) break;
+      }
+      // Large domains (especially video/social platforms) can overwhelm a broad CDX query.
+      // Probe narrower URL prefixes first, then expand to the domain only if needed.
+      const cdxTargets = [...new Set([
+        parsed.hostname + parsed.pathname,
+        'www.' + host + '/',
+        host + '/',
+        parsed.hostname + '/*',
+        wwwHost + '/*',
+        host + '/*'
+      ])];
+      const relays = [
+        u => u,
+        u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+        u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+        u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u)
+      ];
+      let indexedRows = [];
+      for (const target of cdxTargets) {
         const cdx = 'https://web.archive.org/cdx/search/cdx?' + new URLSearchParams({
-          url: host, matchType:'domain', output:'json', filter:'statuscode:200',
-          filter2:'mimetype:text/html', collapse:'timestamp:4',
-          fl:'timestamp,original,statuscode,digest', from:'1996', to:'2026',
-          limit:'250', gzip:'false'
+          url:target, output:'json', filter:'statuscode:200', filter2:'mimetype:text/html',
+          collapse:'timestamp:4', fl:'timestamp,original,statuscode,digest',
+          from:'1996', to:'2026', limit:'120', showResumeKey:'false'
         }).toString();
-        const relay = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(cdx);
-        const response = await timeoutFetch(relay, 12000);
-        if (response.ok) {
-          const data = await response.json();
-          if (Array.isArray(data)) {
-            const indexed = data.slice(1).filter(row => row?.[0] && row?.[1]).map(row => ({
-              timestamp:String(row[0]), original:String(row[1]), status:String(row[2] || 200), digest:String(row[3] || '')
+        for (const relay of relays) {
+          try {
+            const response = await timeoutFetch(relay(cdx), 7000);
+            if (!response.ok) continue;
+            const data = await response.json();
+            if (!Array.isArray(data)) continue;
+            const found = data.slice(1).filter(row => row?.[0] && row?.[1]).map(row => ({
+              timestamp:String(row[0]), original:String(row[1]),
+              status:String(row[2] || 200), digest:String(row[3] || '')
             }));
-            if (indexed.length) rows = indexed;
-          }
+            if (found.length) { indexedRows = found; break; }
+          } catch (_) {}
         }
-      } catch (_) {}
+        if (indexedRows.length >= 8) break;
+      }
+      if (indexedRows.length) rows = indexedRows;
       const unique = new Map();
       rows.forEach(row => unique.set(row.timestamp + '|' + row.original, row));
       rows = [...unique.values()].sort((a,b)=>a.timestamp.localeCompare(b.timestamp));
       setCaptures(rows);
       setYear(rows.length ? Number(rows[rows.length - 1].timestamp.slice(0,4)) : 2000);
-      if (!rows.length) setError(t('No archived snapshot was found, or the archive services are temporarily unavailable. Try a full page URL or another domain.', 'Snapshot arsip tidak ditemukan atau layanan arsip sedang tidak tersedia. Coba alamat halaman lengkap atau domain lain.'));
+      if (!rows.length) setError(t('No public snapshots were found for this page. Some websites block archiving or have limited Wayback coverage. Try the homepage URL (without extra parameters).', 'Snapshot publik untuk halaman ini tidak ditemukan. Beberapa website membatasi pengarsipan atau memang minim arsip Wayback. Coba URL halaman utama tanpa parameter tambahan.'));
     } catch (err) {
       setError(t('That address does not look valid. Check it and try again.', 'Alamat tersebut sepertinya tidak valid. Periksa kembali lalu coba lagi.'));
     } finally { setLoading(false); }
